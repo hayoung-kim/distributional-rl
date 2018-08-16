@@ -127,8 +127,8 @@ class SumTree(object): # Sum Tree Memory
 
         return batch_idx, batch_priorities, batch
 
-class DQNPERAgent(object):
-    def __init__(self, obs_dim, n_action, seed=0,
+class QRDQNPERAgent(object):
+    def __init__(self, obs_dim, n_action, n_quantiles, seed=0,
                  discount_factor = 0.995, epsilon_decay = 0.999, epsilon_min = 0.01,
                  learning_rate = 1e-3, # STEP SIZE
                  batch_size = 64,
@@ -137,6 +137,7 @@ class DQNPERAgent(object):
         self.seed = seed
         self.obs_dim = obs_dim
         self.n_action = n_action
+        self.n_quantiles = n_quantiles
 
         self.discount_factor = discount_factor
         self.learning_rate = learning_rate
@@ -173,16 +174,22 @@ class DQNPERAgent(object):
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden1')
             out = tf.layers.dense(out, hid2_size, tf.tanh, # Tangent Hyperbolic Activation
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden2')
-            self.q_predict = tf.layers.dense(out, self.n_action, # Linear Layer
-                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='q_predict')
+            quantiles = tf.layers.dense(out, self.n_action * self.n_quantiles, # Linear Layer
+                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='q_predicted_quantiles')
+            quantiles = tf.reshape(quantiles, [-1, self.n_action, self.n_quantiles])
+            a_mask = tf.one_hot(self.target_ph, self.n_action, dtype=tf.float32)      # out: [None, n_action]
+            a_mask = tf.expand_dims(a_mask, axis=-1)                                  # out: [None, n_action, 1]
+            self.z = tf.reduce_sum(quantiles * a_mask, axis=1)                        # out: [None, n_quantiles]
+
 
         with tf.variable_scope('q_target'): # Target Network / Two layered perceptron / Old Parameters
             out = tf.layers.dense(self.obs_ph, hid1_size, tf.tanh, # Tangent Hyperbolic Activation
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden1')
             out = tf.layers.dense(out, hid2_size, tf.tanh, # Tangent Hyperbolic Activation
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden2')
-            self.q_predict_old = tf.layers.dense(out, self.n_action, # Linear Layer
-                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='q_predict')
+            quantiles = tf.layers.dense(out, self.n_action * self.n_quantiles, # Linear Layer
+                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='q_predicted_quantiles')
+            quantiles = tf.reshape(quantiles, [-1, self.n_action, self.n_quantiles])
 
         self.weights = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_prediction') # Get Prediction network's Parameters
         self.weights_old = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_target') # Get Target network's Parameters
