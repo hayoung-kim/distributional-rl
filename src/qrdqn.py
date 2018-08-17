@@ -11,6 +11,19 @@ seed = 0
 np.random.seed(seed)
 random.seed(seed)
 
+def huber_loss(x, delta=1.0):
+  """Apply the function:
+  ```
+  0.5*x^2 if |x| < delta else delta*(|x| - 0.5*delta)
+  ```
+  """
+  abs_x = tf.abs(x)
+  return tf.where(
+    abs_x < delta,
+    tf.square(x) * 0.5,
+    delta * (abs_x - 0.5 * delta)
+  )
+
 class PrioritizedReplayMemory(object): #PER memory
     def __init__(self, memory_size=10000, per_alpha=0.2, per_beta0=0.4):
         self.memory = SumTree(capacity=memory_size) # Use sumtree
@@ -128,16 +141,17 @@ class SumTree(object): # Sum Tree Memory
         return batch_idx, batch_priorities, batch
 
 class QRDQNPERAgent(object):
-    def __init__(self, obs_dim, n_action, n_quantiles, seed=0,
+    def __init__(self, observation_dim, n_actions, N, k, seed=0,
                  discount_factor = 0.995, epsilon_decay = 0.999, epsilon_min = 0.01,
                  learning_rate = 1e-3, # STEP SIZE
                  batch_size = 64,
                  memory_size = 2000, hidden_unit_size = 64):
 
         self.seed = seed
-        self.obs_dim = obs_dim
-        self.n_action = n_action
-        self.n_quantiles = n_quantiles
+        self.observation_dim = observation_dim
+        self.n_actions = n_actions
+        self.N = N
+        self.k = k           #
 
         self.discount_factor = discount_factor
         self.learning_rate = learning_rate
@@ -160,44 +174,80 @@ class QRDQNPERAgent(object):
             self.init_session()
 
     def build_placeholders(self):
-        self.obs_ph = tf.placeholder(tf.float32, (None, self.obs_dim), 'obs')
-        self.target_ph = tf.placeholder(tf.float32, (None, self.n_action), 'target')
-        self.batch_weights_ph = tf.placeholder(tf.float32,(None, self.n_action), name="batch_weights")
+        self.observation_ph   = tf.placeholder(tf.float32, (None, self.observation_dim), 'observation')
+        # self.quantile_diff_ph = tf.placeholder(tf.float32, (None, self.N, self.N), 'quantile_differences')    # quantile_difference matrix between quantiles_target and quantiles_pred
+        self.quantile_target_ph = tf.placeholder(tf.float32, (None, self.N), 'quantile_target')
+        # self.batch_weight_ph  = tf.placeholder(tf.float32, (None, self.n_actions), name='batch_weights')
+        self.actions_ph = tf.placeholder(tf.int32, (None), name='action_selected')
+        self.batch_weight_ph  = tf.placeholder(tf.float32, (None, ), name='batch_weights')
         self.learning_rate_ph = tf.placeholder(tf.float32, (), 'lr')
 
     def build_model(self): # Build networks
         hid1_size = self.hidden_unit_size
         hid2_size = self.hidden_unit_size
 
-        with tf.variable_scope('q_prediction'): # Prediction Network / Two layered perceptron / Training Parameters
-            out = tf.layers.dense(self.obs_ph, hid1_size, tf.tanh, # Tangent Hyperbolic Activation
+        with tf.variable_scope('predction_network'): # Prediction Network / Two layered perceptron / Training Parameters
+            out = tf.layers.dense(self.observation_ph, hid1_size, tf.tanh, # Tangent Hyperbolic Activation
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden1')
             out = tf.layers.dense(out, hid2_size, tf.tanh, # Tangent Hyperbolic Activation
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden2')
-            quantiles = tf.layers.dense(out, self.n_action * self.n_quantiles, # Linear Layer
-                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='q_predicted_quantiles')
-            quantiles = tf.reshape(quantiles, [-1, self.n_action, self.n_quantiles])
-            a_mask = tf.one_hot(self.target_ph, self.n_action, dtype=tf.float32)      # out: [None, n_action]
-            a_mask = tf.expand_dims(a_mask, axis=-1)                                  # out: [None, n_action, 1]
-            self.z = tf.reduce_sum(quantiles * a_mask, axis=1)                        # out: [None, n_quantiles]
+            quantiles = tf.layers.dense(out, self.n_actions * self.N, # Linear Layer
+                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='predicted_quantiles')
+            self.quantiles_pred = tf.reshape(quantiles, [-1, self.n_actions, self.N])
 
 
-        with tf.variable_scope('q_target'): # Target Network / Two layered perceptron / Old Parameters
-            out = tf.layers.dense(self.obs_ph, hid1_size, tf.tanh, # Tangent Hyperbolic Activation
+        with tf.variable_scope('target_network'): # Target Network / Two layered perceptron / Old Parameters
+            out = tf.layers.dense(self.observation_ph, hid1_size, tf.tanh, # Tangent Hyperbolic Activation
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden1')
             out = tf.layers.dense(out, hid2_size, tf.tanh, # Tangent Hyperbolic Activation
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden2')
-            quantiles = tf.layers.dense(out, self.n_action * self.n_quantiles, # Linear Layer
-                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='q_predicted_quantiles')
-            quantiles = tf.reshape(quantiles, [-1, self.n_action, self.n_quantiles])
+            quantiles = tf.layers.dense(out, self.n_actions * self.N, # Linear Layer
+                                  kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='predicted_quantiles')
+            self.quantiles_pred_old = tf.reshape(quantiles, [-1, self.n_actions, self.N])
 
-        self.weights = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_prediction') # Get Prediction network's Parameters
-        self.weights_old = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_target') # Get Target network's Parameters
+        self.weights = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='predction_network') # Get Prediction network's Parameters
+        self.weights_old = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_network') # Get Target network's Parameters
 
     def build_loss(self):
-        self.errors = self.target_ph - self.q_predict
-        self.loss = 0.5*tf.reduce_mean(self.batch_weights_ph*tf.square(self.target_ph - self.q_predict))
-        self.optim = tf.train.AdamOptimizer(learning_rate=self.learning_rate_ph).minimize(self.loss)
+        '''
+        quantile_loss = quantile_diff(theta_j - theta_i) -> huber loss -> E_j() -> sum_i
+        '''
+        quantile_target      = self.quantile_target_ph    # out: [None, N]
+        quantile_pred_action = self.quantiles_pred        # out: [None, n_actions, N]
+        actions              = self.actions_ph
+
+        action_mask = tf.one_hot(actions, self.n_actions, dtype=tf.float32)  # [None, n_actions]
+        action_mask = tf.expand_dims(action_mask, axis=-1) # [None, n_actions, 1]
+        quantile_pred = tf.reduce_sum(quantile_pred_action * action_mask, axis=1) # [None, N]
+
+        # compute mid-quantiles
+        mid_quantiles = (np.arange(0, self.N, 1, dtype=np.float64) + 0.5) / float(self.N)
+        mid_quantiles = np.asarray(mid_quantiles, dtype=np.float32)
+        mid_quantiles = tf.constant(mid_quantiles[None, None, :], dtype=tf.float32)
+
+        # target
+        quantile_diff = tf.expand_dims(quantile_target, axis=-2) - tf.expand_dims(quantile_pred, axis=-1)  # [None, N, N]
+
+        # compute quantile penalty weights
+        indicator_fn     = tf.to_float(quantile_diff < 0.0)
+        quantile_weights = tf.abs(mid_quantiles - indicator_fn)
+        quantile_weights = tf.stop_gradient(quantile_weights)
+
+
+        #
+
+
+        # Quantile Regression Loss
+        if self.k == 0:
+            quantile_loss = quantile_weights * quantile_diff
+        else:
+            _huber_loss = huber_loss(quantile_diff, delta=self.k)
+            quantile_loss = quantile_weights * _huber_loss
+
+        quantile_loss = tf.reduce_mean(quantile_loss, axis=-1)                            # E_j(), out: [None, N]
+        self.errors   = tf.reduce_sum(quantile_loss, axis=-1)      # sum_i(), out: [None]
+        self.loss     = tf.reduce_mean(self.batch_weight_ph * self.errors)              # PRIORITIZED, out: []
+        self.optim    = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss) # optimizer
 
     def build_update_operation(self):
         update_ops = []
@@ -223,18 +273,19 @@ class QRDQNPERAgent(object):
             self.epsilon *= self.epsilon_decay
 
     def get_prediction_old(self, obs):
-        q_value_old = self.sess.run(self.q_predict_old,feed_dict={self.obs_ph:obs})
-        return q_value_old
+        quantiles_pred_old = self.sess.run(self.quantiles_pred_old,feed_dict={self.observation_ph:obs})
+        return quantiles_pred_old
 
     def get_prediction(self, obs):
-        q_value = self.sess.run(self.q_predict,feed_dict={self.obs_ph:obs})
-        return q_value
+        quantiles_pred = self.sess.run(self.quantiles_pred,feed_dict={self.observation_ph:obs})
+        return quantiles_pred
 
     def get_action(self, obs):
         if np.random.rand() <= self.epsilon:
-            return random.randrange(self.n_action)
+            return random.randrange(self.n_actions)
         else:
-            q_value = self.get_prediction([obs])
+            quantiles = self.get_prediction([obs])
+            q_value = np.mean(quantiles, axis=-1)
             return np.argmax(q_value[0])
 
     def add_experience(self, obs, action, reward, next_obs, done):
@@ -249,10 +300,11 @@ class QRDQNPERAgent(object):
 
             # PRIORITIZED EXPERIENCE REPLAY
             idx, priorities, w, mini_batch = self.memory.retrieve_experience(self.batch_size)
-            batch_weights = np.transpose(np.tile(w, (self.n_action, 1)))
+            # batch_weights = np.transpose(np.tile(w, (self.n_actions, 1)))
+            batch_weights = w
 
-            observations = np.zeros((self.batch_size, self.obs_dim))
-            next_observations = np.zeros((self.batch_size, self.obs_dim))
+            observations = np.zeros((self.batch_size, self.observation_dim))
+            next_observations = np.zeros((self.batch_size, self.observation_dim))
             actions, rewards, dones = [], [], []
 
             for i in range(self.batch_size):
@@ -262,19 +314,36 @@ class QRDQNPERAgent(object):
                 next_observations[i] = mini_batch[i][3]
                 dones.append(mini_batch[i][4])
 
-            target = self.get_prediction(observations)
-            next_q_value = self.get_prediction_old(next_observations)
+
+            quantiles_pred     = self.get_prediction(observations)            # [None, n_actions, N]
+            quantiles_pred_old = self.get_prediction_old(next_observations)   # [None, n_actions, N]
+
+            Q            = np.mean(quantiles_pred_old, axis=-1)        # calculate Q(s',a')
+            best_actions = np.argmax(Q, 1)                   # best actions for each batch, out: [None]
+
+            quantile_target     = np.zeros((self.batch_size, self.N))
+            quantile_prediction = np.zeros((self.batch_size, self.N))
 
             # BELLMAN UPDATE RULE
             for i in range(self.batch_size):
                 if dones[i]:
-                    target[i][actions[i]] = rewards[i]
+                    quantile_target[i] = rewards[i] * np.ones(self.N)
+
                 else:
-                    target[i][actions[i]] = rewards[i] + self.discount_factor * (np.amax(next_q_value[i]))
+                    best_action = best_actions[i]
+                    quantile_target[i] = rewards[i] + self.discount_factor * quantiles_pred_old[i, best_action]
+
+            # loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
+            #                      feed_dict={self.observation_ph:observations,self.q_target_ph:target,self.learning_rate_ph:self.learning_rate,self.batch_weights_ph:batch_weights})
+
 
             loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
-                                 feed_dict={self.obs_ph:observations,self.target_ph:target,self.learning_rate_ph:self.learning_rate,self.batch_weights_ph:batch_weights})
-            errors = errors[np.arange(len(errors)), actions]
+                                 feed_dict={self.observation_ph: observations,
+                                            self.actions_ph: actions,
+                                            self.quantile_target_ph: quantile_target,
+                                            self.learning_rate_ph: self.learning_rate,
+                                            self.batch_weight_ph: batch_weights})
+            # errors = errors[np.arange(len(errors)), actions]
 
             self.memory.update_experience_weight(idx, errors)
 
@@ -302,7 +371,7 @@ if __name__ == '__main__':
 
     env.seed(seed)
     max_t = env.spec.max_episode_steps
-    agent = DQNPERAgent(env.observation_space.high.shape[0],env.action_space.n)
+    agent = QRDQNPERAgent(env.observation_space.high.shape[0],env.action_space.n, N=20, k=1)
 
     '''
     train agent
