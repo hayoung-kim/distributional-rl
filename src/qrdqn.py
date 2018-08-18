@@ -1,3 +1,5 @@
+#-*- coding: utf-8 -*-
+
 import gym
 import random
 import numpy as np
@@ -7,7 +9,8 @@ from collections import deque
 
 from matplotlib import pyplot as plt
 
-seed = 0
+
+seed = 1
 np.random.seed(seed)
 random.seed(seed)
 
@@ -143,9 +146,9 @@ class SumTree(object): # Sum Tree Memory
 class QRDQNPERAgent(object):
     def __init__(self, observation_dim, n_actions, N, k, seed=0,
                  discount_factor = 0.995, epsilon_decay = 0.999, epsilon_min = 0.01,
-                 learning_rate = 1e-3, # STEP SIZE
-                 batch_size = 64,
-                 memory_size = 2000, hidden_unit_size = 64):
+                 learning_rate = 1e-4, # STEP SIZE
+                 batch_size = 32,
+                 memory_size = 15000, hidden_unit_size = 128):
 
         self.seed = seed
         self.observation_dim = observation_dim
@@ -159,7 +162,7 @@ class QRDQNPERAgent(object):
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
         self.batch_size = batch_size
-        self.train_start = 1000
+        self.train_start = 10000
 
         self.memory = PrioritizedReplayMemory(memory_size=memory_size)
 
@@ -185,25 +188,28 @@ class QRDQNPERAgent(object):
     def build_model(self): # Build networks
         hid1_size = self.hidden_unit_size
         hid2_size = self.hidden_unit_size
+        hid3_size = self.hidden_unit_size
 
         with tf.variable_scope('predction_network'): # Prediction Network / Two layered perceptron / Training Parameters
-            out = tf.layers.dense(self.observation_ph, hid1_size, tf.tanh, # Tangent Hyperbolic Activation
+            out = tf.layers.dense(self.observation_ph, hid1_size, tf.nn.relu,
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden1')
-            out = tf.layers.dense(out, hid2_size, tf.tanh, # Tangent Hyperbolic Activation
+            out = tf.layers.dense(out, hid2_size, tf.nn.relu,
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden2')
             quantiles = tf.layers.dense(out, self.n_actions * self.N, # Linear Layer
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='predicted_quantiles')
             self.quantiles_pred = tf.reshape(quantiles, [-1, self.n_actions, self.N])
+            self.q_pred = tf.reduce_mean(self.quantiles_pred, axis=-1, name='q_pred')
 
 
         with tf.variable_scope('target_network'): # Target Network / Two layered perceptron / Old Parameters
-            out = tf.layers.dense(self.observation_ph, hid1_size, tf.tanh, # Tangent Hyperbolic Activation
+            out = tf.layers.dense(self.observation_ph, hid1_size, tf.nn.relu,
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden1')
-            out = tf.layers.dense(out, hid2_size, tf.tanh, # Tangent Hyperbolic Activation
+            out = tf.layers.dense(out, hid2_size, tf.nn.relu,
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='hidden2')
             quantiles = tf.layers.dense(out, self.n_actions * self.N, # Linear Layer
                                   kernel_initializer=tf.random_normal_initializer(stddev=0.01,seed=self.seed), name='predicted_quantiles')
             self.quantiles_pred_old = tf.reshape(quantiles, [-1, self.n_actions, self.N])
+            self.q_pred_old = tf.reduce_mean(self.quantiles_pred_old, axis=-1, name='q_pred')
 
         self.weights = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='predction_network') # Get Prediction network's Parameters
         self.weights_old = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='target_network') # Get Target network's Parameters
@@ -216,8 +222,8 @@ class QRDQNPERAgent(object):
         quantile_pred_action = self.quantiles_pred        # out: [None, n_actions, N]
         actions              = self.actions_ph
 
-        action_mask = tf.one_hot(actions, self.n_actions, dtype=tf.float32)  # [None, n_actions]
-        action_mask = tf.expand_dims(action_mask, axis=-1) # [None, n_actions, 1]
+        action_mask   = tf.one_hot(actions, self.n_actions, dtype=tf.float32)  # [None, n_actions]
+        action_mask   = tf.expand_dims(action_mask, axis=-1) # [None, n_actions, 1]
         quantile_pred = tf.reduce_sum(quantile_pred_action * action_mask, axis=1) # [None, N]
 
         # compute mid-quantiles
@@ -233,21 +239,17 @@ class QRDQNPERAgent(object):
         quantile_weights = tf.abs(mid_quantiles - indicator_fn)
         quantile_weights = tf.stop_gradient(quantile_weights)
 
-
-        #
-
-
         # Quantile Regression Loss
         if self.k == 0:
             quantile_loss = quantile_weights * quantile_diff
         else:
             _huber_loss = huber_loss(quantile_diff, delta=self.k)
-            quantile_loss = quantile_weights * _huber_loss
+            quantile_loss = quantile_weights * _huber_loss   # out: [None, n_actions, N]
 
-        quantile_loss = tf.reduce_mean(quantile_loss, axis=-1)                            # E_j(), out: [None, N]
+        quantile_loss = tf.reduce_mean(quantile_loss, axis=-1)     # E_j(), out: [None, N]
         self.errors   = tf.reduce_sum(quantile_loss, axis=-1)      # sum_i(), out: [None]
-        self.loss     = tf.reduce_mean(self.batch_weight_ph * self.errors)              # PRIORITIZED, out: []
-        self.optim    = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss) # optimizer
+        self.loss     = tf.reduce_mean(tf.multiply(self.batch_weight_ph, self.errors))               # PRIORITIZED, out: []
+        self.optim    = tf.train.AdamOptimizer(learning_rate=self.learning_rate, epsilon=0.01/32).minimize(self.loss) # optimizer
 
     def build_update_operation(self):
         update_ops = []
@@ -269,7 +271,7 @@ class QRDQNPERAgent(object):
         self.memory.anneal_per_importance_sampling(step,max_step)
 
     def update_policy(self):
-        if self.epsilon > self.epsilon_min:
+        if (self.epsilon > self.epsilon_min) and (self.memory.memory.n_entries > self.train_start):
             self.epsilon *= self.epsilon_decay
 
     def get_prediction_old(self, obs):
@@ -284,8 +286,8 @@ class QRDQNPERAgent(object):
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.n_actions)
         else:
-            quantiles = self.get_prediction([obs])
-            q_value = np.mean(quantiles, axis=-1)
+            quantiles = self.get_prediction([obs]) # out: [1, n_actions, N]
+            q_value = np.mean(quantiles, axis=-1)  # out: [1, n_actions]
             return np.argmax(q_value[0])
 
     def add_experience(self, obs, action, reward, next_obs, done):
@@ -296,7 +298,7 @@ class QRDQNPERAgent(object):
 
         n_entries = self.memory.memory.n_entries
 
-        if n_entries > self.train_start:
+        if n_entries >= self.train_start:
 
             # PRIORITIZED EXPERIENCE REPLAY
             idx, priorities, w, mini_batch = self.memory.retrieve_experience(self.batch_size)
@@ -314,28 +316,21 @@ class QRDQNPERAgent(object):
                 next_observations[i] = mini_batch[i][3]
                 dones.append(mini_batch[i][4])
 
-
-            quantiles_pred     = self.get_prediction(observations)            # [None, n_actions, N]
-            quantiles_pred_old = self.get_prediction_old(next_observations)   # [None, n_actions, N]
-
-            Q            = np.mean(quantiles_pred_old, axis=-1)        # calculate Q(s',a')
-            best_actions = np.argmax(Q, 1)                   # best actions for each batch, out: [None]
-
-            quantile_target     = np.zeros((self.batch_size, self.N))
-            quantile_prediction = np.zeros((self.batch_size, self.N))
+            # calculate Q(s',a')
+            quantiles_pred_old, Q = self.sess.run([self.quantiles_pred_old, self.q_pred_old],
+                                                    feed_dict={self.observation_ph:next_observations})
+            best_actions = np.argmax(Q, axis=-1)   # best actions for each batch, out: [None]
+            quantile_target = np.zeros((self.batch_size, self.N))
 
             # BELLMAN UPDATE RULE
             for i in range(self.batch_size):
+                # print('i', dones[i])
                 if dones[i]:
                     quantile_target[i] = rewards[i] * np.ones(self.N)
 
                 else:
                     best_action = best_actions[i]
                     quantile_target[i] = rewards[i] + self.discount_factor * quantiles_pred_old[i, best_action]
-
-            # loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
-            #                      feed_dict={self.observation_ph:observations,self.q_target_ph:target,self.learning_rate_ph:self.learning_rate,self.batch_weights_ph:batch_weights})
-
 
             loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
                                  feed_dict={self.observation_ph: observations,
@@ -371,28 +366,40 @@ if __name__ == '__main__':
 
     env.seed(seed)
     max_t = env.spec.max_episode_steps
-    agent = QRDQNPERAgent(env.observation_space.high.shape[0],env.action_space.n, N=20, k=1)
+    agent = QRDQNPERAgent(env.observation_space.high.shape[0],env.action_space.n, N=10, k=1, learning_rate=1e-3)
 
     '''
     train agent
     '''
     avg_return_list = deque(maxlen=10)
     avg_loss_list = deque(maxlen=10)
-    nepisodes = 1500
-    for i in range(nepisodes):
+    nepisodes = 2000
+    step = 0
+
+    MAX_STEP = 100000
+    episode = 0
+
+    rewards_history = []
+    loss_history = []
+
+    plt.style.use('ggplot')
+    plt.figure(figsize=(14,7))
+
+    while (step < MAX_STEP):
         obs = env.reset()
         done = False
         total_reward = 0
         total_loss = 0
+        episode_len = 0
+
         for t in range(max_t):
-            # Get transition
+            episode_len += 1
+            step += 1
             action = agent.get_action(obs)
             next_obs, reward, done, info = env.step(action)
 
-            # Add experience
             agent.add_experience(obs,action,reward,next_obs,done)
 
-            # Online update perdiction network parameter
             loss = agent.train_model()
             agent.update_policy()
 
@@ -400,21 +407,58 @@ if __name__ == '__main__':
             total_reward += reward
             total_loss += loss
 
+            if (step % 200 == 0):
+                ''' target network 업데이트 '''
+                agent.update_target()
+
+
             if done:
+                episode += 1
+                rewards_history.append(total_reward)
+                loss_history.append(total_loss)
+                print(' [{:5d}/{:5d}] epi={:4d}, epi_len={:3d}, reward={:.3f}, loss={:.5f}').format(step, MAX_STEP, episode, episode_len, total_reward, total_loss)
+                if (episode % 10 == 0):
+                    plt.hold()
+                    plt.subplot(1,2,1)
+                    plt.plot(range(0, len(rewards_history)), rewards_history, '.-', color='red')
+                    plt.axis([0, 4000, 0, 600])
+                    plt.xlabel('episode')
+                    plt.ylabel('returns')
+                    plt.draw()
+                    plt.subplot(1,2,2)
+                    plt.plot(range(0, len(loss_history)), loss_history, '.-', color='blue')
+                    plt.axis([0, 4000, 0, 10000])
+                    plt.xlabel('episode')
+                    plt.ylabel('loss')
+                    plt.draw()
+                    plt.tight_layout()
+                    plt.pause(0.05)
                 break
 
-        # Update target network parameter
-        agent.update_target()
+
         avg_return_list.append(total_reward)
         avg_loss_list.append(total_loss)
 
-        if (np.mean(avg_return_list) > 490): # Threshold return to success cartpole
-            print('[{}/{}] loss : {:.3f}, return : {:.3f}, eps : {:.3f}'.format(i,nepisodes, np.mean(avg_loss_list), np.mean(avg_return_list), agent.epsilon))
-            print('The problem is solved with {} episodes'.format(i))
+        if (np.mean(avg_return_list) > 490):
+            print('The problem is solved with {} episodes'.format(episode))
+            print('estimated quantiles:')
+            print(agent.get_prediction([obs]))
+            plt.hold()
+            plt.subplot(1,2,1)
+            plt.plot(range(0, len(rewards_history)), rewards_history, '.-', color='red')
+            plt.axis([0, 4000, 0, 600])
+            plt.xlabel('episode')
+            plt.ylabel('returns')
+            plt.draw()
+            plt.subplot(1,2,2)
+            plt.plot(range(0, len(loss_history)), loss_history, '.-', color='blue')
+            plt.axis([0, 4000, 0, 10000])
+            plt.xlabel('episode')
+            plt.ylabel('loss')
+            plt.draw()
+            plt.tight_layout()
+            plt.show()
             break
-
-        if (i%100)==0:
-            print('[{}/{}] loss : {:.3f}, return : {:.3f}, eps : {:.3f}'.format(i,nepisodes, np.mean(avg_loss_list), np.mean(avg_return_list), agent.epsilon))
 
 
     '''
