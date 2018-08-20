@@ -332,12 +332,14 @@ class QRDQNPERAgent(object):
                     best_action = best_actions[i]
                     quantile_target[i] = rewards[i] + self.discount_factor * quantiles_pred_old[i, best_action]
 
-            loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
-                                 feed_dict={self.observation_ph: observations,
-                                            self.actions_ph: actions,
-                                            self.quantile_target_ph: quantile_target,
-                                            self.learning_rate_ph: self.learning_rate,
-                                            self.batch_weight_ph: batch_weights})
+            n_REPEAT_TRAIN = 1
+            for _n_train in range(n_REPEAT_TRAIN):
+                loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
+                                     feed_dict={self.observation_ph: observations,
+                                                self.actions_ph: actions,
+                                                self.quantile_target_ph: quantile_target,
+                                                self.learning_rate_ph: self.learning_rate,
+                                                self.batch_weight_ph: batch_weights})
             # errors = errors[np.arange(len(errors)), actions]
 
             self.memory.update_experience_weight(idx, errors)
@@ -348,14 +350,16 @@ if __name__ == '__main__':
     '''
     define env. and agent
     '''
-    env = gym.make('CartPole-v1')
+    # env = gym.make('CartPole-v1')
+    env = gym.make('FrozenLake-v0')
     obs_space = env.observation_space
     print('Observation space')
     print(type(obs_space))
     print(obs_space.shape)
-    print("Dimension:{}".format(obs_space.shape[0]))
-    print("High: {}".format(obs_space.high))
-    print("Low: {}".format(obs_space.low))
+    # print("Dimension:{}".format(obs_space.shape[0]))
+    # print("Dimension:{}".format(obs_space.shape))
+    # print("High: {}".format(obs_space.high))
+    # print("Low: {}".format(obs_space.low))
     print()
 
     act_space = env.action_space
@@ -366,7 +370,11 @@ if __name__ == '__main__':
 
     env.seed(seed)
     max_t = env.spec.max_episode_steps
-    agent = QRDQNPERAgent(env.observation_space.high.shape[0],env.action_space.n, N=10, k=1, learning_rate=1e-3)
+
+    ''' AGENT '''
+    # agent = QRDQNPERAgent(env.observation_space.high.shape[0],env.action_space.n, N=10, k=1, learning_rate=5e-5)
+    agent = QRDQNPERAgent(1,env.action_space.n, N=10, k=1, learning_rate=5e-4, hidden_unit_size=32)
+    RETURN_MAX, LOSS_MAX = 2, 10.0
 
     '''
     train agent
@@ -376,14 +384,14 @@ if __name__ == '__main__':
     nepisodes = 2000
     step = 0
 
-    MAX_STEP = 100000
+    MAX_STEP = 1000000
     episode = 0
 
     rewards_history = []
     loss_history = []
 
     plt.style.use('ggplot')
-    plt.figure(figsize=(14,7))
+    plt.figure(figsize=(14,10))
 
     while (step < MAX_STEP):
         obs = env.reset()
@@ -395,7 +403,8 @@ if __name__ == '__main__':
         for t in range(max_t):
             episode_len += 1
             step += 1
-            action = agent.get_action(obs)
+            # action = agent.get_action(obs)
+            action = agent.get_action([obs])
             next_obs, reward, done, info = env.step(action)
 
             agent.add_experience(obs,action,reward,next_obs,done)
@@ -407,27 +416,40 @@ if __name__ == '__main__':
             total_reward += reward
             total_loss += loss
 
-            if (step % 200 == 0):
+            if (step % 1000 == 0):
                 ''' target network 업데이트 '''
                 agent.update_target()
+
+            if (np.mean(avg_return_list) >= 0.6 and (done)) or ((done) and (episode % 1000 == 0) and step > 10000):
+                for act in range(4):
+                    _ = plt.subplot(2,4,act+5)
+                    _.cla()
+                    qs = agent.get_prediction([[obs]])
+                    plt.plot(qs[0][act], 'o-', color='green', alpha=0.8)
+                    plt.axis([0, agent.N, np.min(qs[0][act]), np.max(qs[0][act])])
+                    plt.xlabel('quantile')
+                    plt.ylabel('val')
+                    plt.draw()
+                    plt.tight_layout()
+                    plt.pause(0.02)
 
 
             if done:
                 episode += 1
                 rewards_history.append(total_reward)
                 loss_history.append(total_loss)
-                print(' [{:5d}/{:5d}] epi={:4d}, epi_len={:3d}, reward={:.3f}, loss={:.5f}').format(step, MAX_STEP, episode, episode_len, total_reward, total_loss)
+                print(' [{:5d}/{:5d}] eps={:.3f} epi={:4d}, epi_len={:3d}, reward={:.3f}, loss={:.5f}').format(step, MAX_STEP, agent.epsilon, episode, episode_len, total_reward, total_loss)
                 if (episode % 10 == 0):
                     plt.hold()
-                    plt.subplot(1,2,1)
-                    plt.plot(range(0, len(rewards_history)), rewards_history, '.-', color='red')
-                    plt.axis([0, 4000, 0, 600])
+                    plt.subplot(2,4,(1,2))
+                    plt.plot(range(0, len(rewards_history)), rewards_history, 'o', color='red', alpha=0.6)
+                    plt.axis([episode-50, episode+50, -1, RETURN_MAX])
                     plt.xlabel('episode')
                     plt.ylabel('returns')
                     plt.draw()
-                    plt.subplot(1,2,2)
-                    plt.plot(range(0, len(loss_history)), loss_history, '.-', color='blue')
-                    plt.axis([0, 4000, 0, 10000])
+                    plt.subplot(2,4,(3,4))
+                    plt.plot(range(0, len(loss_history)), loss_history, 'o', color='blue', alpha=0.6)
+                    plt.axis([episode-50, episode+50, 0, LOSS_MAX])
                     plt.xlabel('episode')
                     plt.ylabel('loss')
                     plt.draw()
@@ -439,32 +461,33 @@ if __name__ == '__main__':
         avg_return_list.append(total_reward)
         avg_loss_list.append(total_loss)
 
-        if (np.mean(avg_return_list) > 490):
+        if (np.mean(avg_return_list) >= 0.7):
             print('The problem is solved with {} episodes'.format(episode))
-            print('estimated quantiles:')
-            print(agent.get_prediction([obs]))
-            plt.hold()
-            plt.subplot(1,2,1)
-            plt.plot(range(0, len(rewards_history)), rewards_history, '.-', color='red')
-            plt.axis([0, 4000, 0, 600])
-            plt.xlabel('episode')
-            plt.ylabel('returns')
-            plt.draw()
-            plt.subplot(1,2,2)
-            plt.plot(range(0, len(loss_history)), loss_history, '.-', color='blue')
-            plt.axis([0, 4000, 0, 10000])
-            plt.xlabel('episode')
-            plt.ylabel('loss')
-            plt.draw()
-            plt.tight_layout()
-            plt.show()
-            break
+            # print('estimated quantiles:')
+            # print(agent.get_prediction([obs]))
+            # plt.hold()
+            # plt.subplot(2,4,(1,2))
+            # plt.plot(range(0, len(rewards_history)), rewards_history, '.-', color='red', alpha=0.6)
+            # plt.axis([episode-2500, episode+2500, 0, RETURN_MAX])
+            # plt.xlabel('episode')
+            # plt.ylabel('returns')
+            # plt.draw()
+            # plt.subplot(2,4,(3,4))
+            # plt.plot(range(0, len(loss_history)), loss_history, '.-', color='blue', alpha=0.6)
+            # plt.axis([episode-2500, episode+2500, 0, LOSS_MAX])
+            # plt.xlabel('episode')
+            # plt.ylabel('loss')
+            # plt.draw()
+            # plt.tight_layout()
+            # plt.show()
+            # break
 
 
     '''
     test agent
     '''
-    env = gym.make('CartPole-v1')
+    # env = gym.make('CartPole-v1')
+    env = gym.make('FrozenLake-v0')
     obs = env.reset()
     total_reward = 0
     frames = []
