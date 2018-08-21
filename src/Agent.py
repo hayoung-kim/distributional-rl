@@ -28,7 +28,7 @@ class IQNAgent(object):
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
         self.batch_size = batch_size
-        self.train_start = 10000
+        self.train_start = 64
 
         self.memory = PrioritizedReplayMemory(memory_size=memory_size)
 
@@ -43,19 +43,15 @@ class IQNAgent(object):
             self.init_session()
 
     def build_placeholders(self):
-        self.observation_ph   = tf.placeholder(tf.float32, (None, self.observation_dim), 'observation')
-        # self.quantile_diff_ph = tf.placeholder(tf.float32, (None, self.N, self.N), 'quantile_differences')    # quantile_difference matrix between quantiles_target and quantiles_pred
-        self.quantile_target_ph = tf.placeholder(tf.float32, (None, self.N), 'quantile_target')
-        # self.batch_weight_ph  = tf.placeholder(tf.float32, (None, self.n_actions), name='batch_weights')
-        self.actions_ph = tf.placeholder(tf.int32, (None), name='action_selected')
-        self.batch_weight_ph  = tf.placeholder(tf.float32, (None, ), name='batch_weights')
-        self.learning_rate_ph = tf.placeholder(tf.float32, (), 'lr')
-
         ''' 네트워크 관련 placeholders '''
         self.tau_ph = tf.placeholder(tf.float32, (None, self.N))    # samples의 갯수 [batch, N]
+        self.observation_ph   = tf.placeholder(tf.float32, (None, self.observation_dim), 'observation')
 
         ''' loss 계산 관련 placeholders '''
-        self.td_target_ph = tf.placeholder(tf.float32, (None, self.N), 'td_target')
+        self.actions_ph = tf.placeholder(tf.int32, (None), name='action_selected')  # (s,a,s',r) 중 a
+        self.td_target_ph = tf.placeholder(tf.float32, (None, self.N), 'td_target') # sample당 td_errors
+        self.batch_weight_ph  = tf.placeholder(tf.float32, (None, ), name='batch_weights') # prioritized experience replay
+        self.learning_rate_ph = tf.placeholder(tf.float32, (), 'lr') # learning rate
 
     def build_model(self):
         hidden_size = [64, 64]
@@ -103,17 +99,17 @@ class IQNAgent(object):
         pred_action = self.samples_per_action_pred        # out: [None, n_actions, N]
         actions     = self.actions_ph
 
-        action_mask   = tf.one_hot(actions, self.n_actions, dtype=tf.float32)  # [None, n_actions]
-        action_mask   = tf.expand_dims(action_mask, axis=-1) # [None, n_actions, 1]
-        td_prediction = tf.reduce_sum(pred_action * action_mask, axis=1) # [None, N]
+        action_mask   = tf.one_hot(actions, self.n_actions, dtype=tf.float32)   # [None, n_actions]
+        action_mask   = tf.expand_dims(action_mask, axis=-1)    # [None, n_actions, 1]
+        td_prediction = tf.reduce_sum(pred_action * action_mask, axis=1)    # [None, N]
 
         ''' td error 계산 '''
         td_target = self.td_target_ph    # out: [None, N]
-        td_error  = tf.expand_dims(td_target, axis=-2) - tf.expand_dims(td_prediction, axis=-1)  # [None, N, N]
+        td_error  = tf.expand_dims(td_target, axis=-2) - tf.expand_dims(td_prediction, axis=-1)  # [None, N]
 
         ''' quantile weight 계산'''
-        indicator_fn     = tf.to_float(td_error < 0.0)
-        quantile_weights = tf.abs(td_prediction - indicator_fn)
+        indicator_fn     = tf.to_float(td_error < 0.0)   # [None, N, N]
+        quantile_weights = tf.abs(tf.expand_dims(td_prediction, axis=-1) - indicator_fn)
         quantile_weights = tf.stop_gradient(quantile_weights)
 
         ''' huber quantile loss 계산 '''
@@ -152,19 +148,21 @@ class IQNAgent(object):
             self.epsilon *= self.epsilon_decay
 
     def get_prediction_old(self, obs):
-        quantiles_pred_old = self.sess.run(self.quantiles_pred_old,feed_dict={self.observation_ph:obs})
-        return quantiles_pred_old
+        samples_per_action = self.sess.run(self.samples_per_action_target,feed_dict={self.observation_ph:obs})
+        return samples_per_action
 
     def get_prediction(self, obs):
-        quantiles_pred = self.sess.run(self.quantiles_pred,feed_dict={self.observation_ph:obs})
-        return quantiles_pred
+        N = 8
+        tau = np.random.rand(N)
+        samples_per_action = self.sess.run(self.samples_per_action_pred, feed_dict={self.observation_ph:obs, self.tau_ph:[tau]})
+        return samples_per_action
 
     def get_action(self, obs):
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.n_actions)
         else:
-            quantiles = self.get_prediction([obs]) # out: [1, n_actions, N]
-            q_value = np.mean(quantiles, axis=-1)  # out: [1, n_actions]
+            samples = self.get_prediction([obs]) # out: [1, n_actions, N]
+            q_value = np.mean(samples, axis=-1)  # out: [1, n_actions]
             return np.argmax(q_value[0])
 
     def add_experience(self, obs, action, reward, next_obs, done):
@@ -176,7 +174,6 @@ class IQNAgent(object):
         n_entries = self.memory.memory.n_entries
 
         if n_entries >= self.train_start:
-
             # PRIORITIZED EXPERIENCE REPLAY
             idx, priorities, w, mini_batch = self.memory.retrieve_experience(self.batch_size)
             # batch_weights = np.transpose(np.tile(w, (self.n_actions, 1)))
@@ -193,30 +190,46 @@ class IQNAgent(object):
                 next_observations[i] = mini_batch[i][3]
                 dones.append(mini_batch[i][4])
 
-            # calculate Q(s',a')
-            quantiles_pred_old, Q = self.sess.run([self.quantiles_pred_old, self.q_pred_old],
-                                                    feed_dict={self.observation_ph:next_observations})
-            best_actions = np.argmax(Q, axis=-1)   # best actions for each batch, out: [None]
-            quantile_target = np.zeros((self.batch_size, self.N))
+            ''' random sample 만들고 prediction, target network 결과 추출 '''
+            # 아직 risk 고려해서 sampling 안함. 앞으로 코드에 추가해야할 일
+            tau = np.random.rand(self.batch_size, 32)  # 32개의 sample 뽑기
+            samples_from_target = self.sess.run(self.samples_per_action_pred,
+                                                feed_dict={self.observation_ph: next_observations,
+                                                           self.tau_ph: tau})   # out: [batch, n_actions, K]
+
+            ''' Q(s',a')을 최대화 하는 a' 찾기 '''
+            Q = np.mean(samples_from_target, axis=-1)   # out: [batch, n_actions]
+
+            best_actions = np.argmax(Q, axis=-1)        # best actions for each batch, out: [None]
+
+            ''' TD target 생성 [None, N]'''
+            N = 8
+            tau = np.random.rand(self.batch_size, N)
+            samples_from_target = self.sess.run(self.samples_per_action_pred,
+                                                feed_dict={self.observation_ph: next_observations,
+                                                           self.tau_ph: tau})   # out: [batch, n_actions, N]
+
+            td_target = np.zeros((self.batch_size, N))
 
             # BELLMAN UPDATE RULE
             for i in range(self.batch_size):
                 # print('i', dones[i])
                 if dones[i]:
-                    quantile_target[i] = rewards[i] * np.ones(self.N)
+                    td_target[i] = rewards[i] * np.ones(N)
 
                 else:
                     best_action = best_actions[i]
-                    quantile_target[i] = rewards[i] + self.discount_factor * quantiles_pred_old[i, best_action]
+                    td_target[i] = rewards[i] + self.discount_factor * samples_from_target[i, best_action]
 
-            n_REPEAT_TRAIN = 1
-            for _n_train in range(n_REPEAT_TRAIN):
-                loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
-                                     feed_dict={self.observation_ph: observations,
-                                                self.actions_ph: actions,
-                                                self.quantile_target_ph: quantile_target,
-                                                self.learning_rate_ph: self.learning_rate,
-                                                self.batch_weight_ph: batch_weights})
+            ''' 최적화 '''
+            tau = np.random.rand(self.batch_size, N)
+            loss, errors, _ = self.sess.run([self.loss, self.errors, self.optim],
+                                 feed_dict={self.observation_ph: observations,
+                                            self.actions_ph: actions,
+                                            self.td_target_ph: td_target,
+                                            self.tau_ph: tau,
+                                            self.learning_rate_ph: self.learning_rate,
+                                            self.batch_weight_ph: batch_weights})
             # errors = errors[np.arange(len(errors)), actions]
 
             self.memory.update_experience_weight(idx, errors)
