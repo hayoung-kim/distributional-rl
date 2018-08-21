@@ -372,8 +372,8 @@ if __name__ == '__main__':
     max_t = env.spec.max_episode_steps
 
     ''' AGENT '''
-    # agent = QRDQNPERAgent(env.observation_space.high.shape[0],env.action_space.n, N=10, k=1, learning_rate=5e-5)
-    agent = QRDQNPERAgent(1,env.action_space.n, N=10, k=1, learning_rate=5e-4, hidden_unit_size=32)
+    agent = QRDQNPERAgent(env.observation_space.high.shape[0],env.action_space.n, N=10, k=1, learning_rate=5e-5)
+    # agent = QRDQNPERAgent(1,env.action_space.n, N=10, k=1, learning_rate=5e-4, hidden_unit_size=32)
     RETURN_MAX, LOSS_MAX = 2, 10.0
 
     '''
@@ -390,8 +390,8 @@ if __name__ == '__main__':
     rewards_history = []
     loss_history = []
 
-    plt.style.use('ggplot')
-    plt.figure(figsize=(14,10))
+    # plt.style.use('ggplot')
+    # plt.figure(figsize=(14,10))
 
     while (step < MAX_STEP):
         obs = env.reset()
@@ -403,8 +403,8 @@ if __name__ == '__main__':
         for t in range(max_t):
             episode_len += 1
             step += 1
-            # action = agent.get_action(obs)
-            action = agent.get_action([obs])
+            action = agent.get_action(obs)
+            # action = agent.get_action([obs])
             next_obs, reward, done, info = env.step(action)
 
             agent.add_experience(obs,action,reward,next_obs,done)
@@ -420,18 +420,18 @@ if __name__ == '__main__':
                 ''' target network 업데이트 '''
                 agent.update_target()
 
-            if (np.mean(avg_return_list) >= 0.6 and (done)) or ((done) and (episode % 1000 == 0) and step > 10000):
-                for act in range(4):
-                    _ = plt.subplot(2,4,act+5)
-                    _.cla()
-                    qs = agent.get_prediction([[obs]])
-                    plt.plot(qs[0][act], 'o-', color='green', alpha=0.8)
-                    plt.axis([0, agent.N, np.min(qs[0][act]), np.max(qs[0][act])])
-                    plt.xlabel('quantile')
-                    plt.ylabel('val')
-                    plt.draw()
-                    plt.tight_layout()
-                    plt.pause(0.02)
+            # if (np.mean(avg_return_list) >= 0.6 and (done)) or ((done) and (episode % 1000 == 0) and step > 10000):
+            #     for act in range(4):
+            #         _ = plt.subplot(2,4,act+5)
+            #         _.cla()
+            #         qs = agent.get_prediction([[obs]])
+            #         plt.plot(qs[0][act], 'o-', color='green', alpha=0.8)
+            #         plt.axis([0, agent.N, np.min(qs[0][act]), np.max(qs[0][act])])
+            #         plt.xlabel('quantile')
+            #         plt.ylabel('val')
+            #         plt.draw()
+            #         plt.tight_layout()
+            #         plt.pause(0.02)
 
 
             if done:
@@ -439,29 +439,29 @@ if __name__ == '__main__':
                 rewards_history.append(total_reward)
                 loss_history.append(total_loss)
                 print(' [{:5d}/{:5d}] eps={:.3f} epi={:4d}, epi_len={:3d}, reward={:.3f}, loss={:.5f}').format(step, MAX_STEP, agent.epsilon, episode, episode_len, total_reward, total_loss)
-                if (episode % 10 == 0):
-                    plt.hold()
-                    plt.subplot(2,4,(1,2))
-                    plt.plot(range(0, len(rewards_history)), rewards_history, 'o', color='red', alpha=0.6)
-                    plt.axis([episode-50, episode+50, -1, RETURN_MAX])
-                    plt.xlabel('episode')
-                    plt.ylabel('returns')
-                    plt.draw()
-                    plt.subplot(2,4,(3,4))
-                    plt.plot(range(0, len(loss_history)), loss_history, 'o', color='blue', alpha=0.6)
-                    plt.axis([episode-50, episode+50, 0, LOSS_MAX])
-                    plt.xlabel('episode')
-                    plt.ylabel('loss')
-                    plt.draw()
-                    plt.tight_layout()
-                    plt.pause(0.05)
+                # if (episode % 10 == 0):
+                #     plt.hold()
+                #     plt.subplot(2,4,(1,2))
+                #     plt.plot(range(0, len(rewards_history)), rewards_history, 'o', color='red', alpha=0.6)
+                #     plt.axis([episode-50, episode+50, -1, RETURN_MAX])
+                #     plt.xlabel('episode')
+                #     plt.ylabel('returns')
+                #     plt.draw()
+                #     plt.subplot(2,4,(3,4))
+                #     plt.plot(range(0, len(loss_history)), loss_history, 'o', color='blue', alpha=0.6)
+                #     plt.axis([episode-50, episode+50, 0, LOSS_MAX])
+                #     plt.xlabel('episode')
+                #     plt.ylabel('loss')
+                #     plt.draw()
+                #     plt.tight_layout()
+                #     plt.pause(0.05)
                 break
 
 
         avg_return_list.append(total_reward)
         avg_loss_list.append(total_loss)
 
-        if (np.mean(avg_return_list) >= 0.7):
+        if (np.mean(avg_return_list) >= 480):
             print('The problem is solved with {} episodes'.format(episode))
             # print('estimated quantiles:')
             # print(agent.get_prediction([obs]))

@@ -114,7 +114,7 @@ if __name__ == '__main__':
                 #     plt.draw()
                 #     plt.tight_layout()
                 #     plt.pause(0.05)
-                # break
+                break
 
         avg_return_list.append(total_reward)
         avg_loss_list.append(total_loss)
