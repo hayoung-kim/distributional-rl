@@ -28,7 +28,7 @@ class IQNAgent(object):
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
         self.batch_size = batch_size
-        self.train_start = 64
+        self.train_start = 500
 
         self.memory = PrioritizedReplayMemory(memory_size=memory_size)
 
@@ -192,10 +192,8 @@ class IQNAgent(object):
 
             ''' random sample 만들고 prediction, target network 결과 추출 '''
             # 아직 risk 고려해서 sampling 안함. 앞으로 코드에 추가해야할 일
-            tau = np.random.rand(self.batch_size, 32)  # 32개의 sample 뽑기
-            samples_from_target = self.sess.run(self.samples_per_action_pred,
-                                                feed_dict={self.observation_ph: next_observations,
-                                                           self.tau_ph: tau})   # out: [batch, n_actions, K]
+            tau = np.random.rand(self.batch_size, 8)  # 32개의 sample 뽑기
+            samples_from_target = self.sess.run(self.samples_per_action_pred, feed_dict={self.observation_ph: next_observations, self.tau_ph: tau})   # out: [batch, n_actions, K]
 
             ''' Q(s',a')을 최대화 하는 a' 찾기 '''
             Q = np.mean(samples_from_target, axis=-1)   # out: [batch, n_actions]
