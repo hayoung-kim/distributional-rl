@@ -10,7 +10,8 @@ from helper import huber_loss
 from replayMemory import PrioritizedReplayMemory
 
 class IQNAgent(object):
-    def __init__(self, observation_dim, n_actions, N, k, seed=0,
+    def __init__(self, observation_dim, n_actions,
+                 N = 8, N_target = 8, K = 32, huber_k = 1, n_embedding_dim = 64, seed=0,
                  discount_factor = 0.995, epsilon_decay = 0.999, epsilon_min = 0.01,
                  learning_rate = 1e-4, # STEP SIZE
                  batch_size = 32,
@@ -19,8 +20,12 @@ class IQNAgent(object):
         self.seed = seed
         self.observation_dim = observation_dim
         self.n_actions = n_actions
-        self.N = N
-        self.k = k
+        self.N = N     # prediction network에서 출력할 샘플 수 (N)
+        self.N_target = N_target   # target network에서 출력할 샘플 수 (N')
+        self.K = K     # policy 계산시 사용할 샘플 수
+        self.huber_k = huber_k     # huber loss 차원
+        self.n_embedding_dim = n_embedding_dim
+
 
         self.discount_factor = discount_factor
         self.learning_rate = learning_rate
@@ -55,8 +60,10 @@ class IQNAgent(object):
 
     def build_model(self):
         hidden_size = self.hidden_unit_size
+        n_embedding_dim = self.n_embedding_dim
+
         n_layers = len(hidden_size)
-        n_embedding_dim = 64
+
         tau = tf.transpose(tf.expand_dims(self.tau_ph, axis=0), [2,1,0])     # out: [N, batch, 1]
 
         with tf.variable_scope('predction_network'):
@@ -114,10 +121,10 @@ class IQNAgent(object):
         quantile_weights = tf.stop_gradient(quantile_weights)
 
         ''' huber quantile loss 계산 '''
-        if self.k == 0:
+        if self.huber_k == 0:
             quantile_loss = quantile_weights * td_error
         else:
-            _huber_loss = huber_loss(td_error, delta=self.k)
+            _huber_loss = huber_loss(td_error, delta=self.huber_k)
             quantile_loss = quantile_weights * _huber_loss   # out: [None, N, N]
 
         quantile_loss = tf.reduce_mean(quantile_loss, axis=-1)     # target (j)에 대해 평균치 구하기, out: [None, N]
@@ -139,12 +146,14 @@ class IQNAgent(object):
         self.sess.run(self.update_ops)
 
     def update_target(self):
+        ''' target network 업데이트'''
         self.sess.run(self.update_ops)
 
     def update_memory(self, step, max_step):
         self.memory.anneal_per_importance_sampling(step,max_step)
 
     def update_policy(self):
+        ''' epsilon greedy '''
         if (self.epsilon > self.epsilon_min) and (self.memory.memory.n_entries > self.train_start):
             self.epsilon *= self.epsilon_decay
 
@@ -153,8 +162,8 @@ class IQNAgent(object):
         return samples_per_action
 
     def get_prediction(self, obs):
-        N = 8
-        tau = np.random.rand(N)
+        ''' N개의 random sample을 이용해서 action별 reward sample 뽑기 '''
+        tau = np.random.rand(self.N)
         samples_per_action = self.sess.run(self.samples_per_action_pred, feed_dict={self.observation_ph:obs, self.tau_ph:[tau]})
         return samples_per_action
 
@@ -193,12 +202,17 @@ class IQNAgent(object):
 
             ''' random sample 만들고 prediction, target network 결과 추출 '''
             # 아직 risk 고려해서 sampling 안함. 앞으로 코드에 추가해야할 일
-            tau = np.random.rand(self.batch_size, 8)  # 32개의 sample 뽑기
-            samples_from_target = self.sess.run(self.samples_per_action_pred, feed_dict={self.observation_ph: next_observations, self.tau_ph: tau})   # out: [batch, n_actions, K]
+
+            for k in range(self.K // self.N):
+                tau = np.random.rand(self.batch_size, self.N)  # 32개의 sample 뽑기
+                samples_from_target = self.sess.run(self.samples_per_action_target, feed_dict={self.observation_ph: next_observations, self.tau_ph: tau})   # out: [batch, n_actions, N]
+                if k == 0:
+                    Z_tau_pred = np.array(samples_from_target)
+                else:
+                    Z_tau_pred = np.concatenate((Z_tau_pred, samples_from_target), axis=-1)
 
             ''' Q(s',a')을 최대화 하는 a' 찾기 '''
-            Q = np.mean(samples_from_target, axis=-1)   # out: [batch, n_actions]
-
+            Q = np.mean(Z_tau_pred, axis=-1)   # out: [batch, n_actions]
             best_actions = np.argmax(Q, axis=-1)        # best actions for each batch, out: [None]
 
             ''' TD target 생성 [None, N]'''

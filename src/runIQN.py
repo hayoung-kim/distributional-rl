@@ -34,7 +34,8 @@ if __name__ == '__main__':
     max_t = env.spec.max_episode_steps
 
     ''' AGENT '''
-    agent = IQNAgent(env.observation_space.high.shape[0],env.action_space.n, N=8, k=1, learning_rate=5e-5)
+    agent = IQNAgent(env.observation_space.high.shape[0],env.action_space.n,
+                     N=8, N_target = 8, K = 32, n_embedding_dim = 64, huber_k=1, learning_rate=5e-5)
     # agent = IQNAgent(1, env.action_space.n, N=None, k=1, learning_rate=5e-4, hidden_unit_size=32)
     RETURN_MAX, LOSS_MAX = 2, 10.0
 
