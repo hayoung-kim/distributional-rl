@@ -14,7 +14,7 @@ class IQNAgent(object):
                  discount_factor = 0.995, epsilon_decay = 0.999, epsilon_min = 0.01,
                  learning_rate = 1e-4, # STEP SIZE
                  batch_size = 32,
-                 memory_size = 15000, hidden_unit_size = 128):
+                 memory_size = 15000, hidden_unit_size = [64, 64]):
 
         self.seed = seed
         self.observation_dim = observation_dim
@@ -54,7 +54,7 @@ class IQNAgent(object):
         self.learning_rate_ph = tf.placeholder(tf.float32, (), 'lr') # learning rate
 
     def build_model(self):
-        hidden_size = [64, 64]
+        hidden_size = self.hidden_unit_size
         n_layers = len(hidden_size)
         n_embedding_dim = 64
         tau = tf.transpose(tf.expand_dims(self.tau_ph, axis=0), [2,1,0])     # out: [N, batch, 1]
@@ -105,11 +105,12 @@ class IQNAgent(object):
 
         ''' td error 계산 '''
         td_target = self.td_target_ph    # out: [None, N]
-        td_error  = tf.expand_dims(td_target, axis=-2) - tf.expand_dims(td_prediction, axis=-1)  # [None, N]
+        td_error  = tf.expand_dims(td_target, axis=-2) - tf.expand_dims(td_prediction, axis=-1)  # [None, N, N]
 
         ''' quantile weight 계산'''
+        tau = self.tau_ph   # [None, self.N]
         indicator_fn     = tf.to_float(td_error < 0.0)   # [None, N, N]
-        quantile_weights = tf.abs(tf.expand_dims(td_prediction, axis=-1) - indicator_fn)
+        quantile_weights = tf.abs(tf.expand_dims(tau, axis=-1) - indicator_fn)
         quantile_weights = tf.stop_gradient(quantile_weights)
 
         ''' huber quantile loss 계산 '''
@@ -211,7 +212,6 @@ class IQNAgent(object):
 
             # BELLMAN UPDATE RULE
             for i in range(self.batch_size):
-                # print('i', dones[i])
                 if dones[i]:
                     td_target[i] = rewards[i] * np.ones(N)
 
@@ -228,7 +228,6 @@ class IQNAgent(object):
                                             self.tau_ph: tau,
                                             self.learning_rate_ph: self.learning_rate,
                                             self.batch_weight_ph: batch_weights})
-            # errors = errors[np.arange(len(errors)), actions]
 
             self.memory.update_experience_weight(idx, errors)
 
