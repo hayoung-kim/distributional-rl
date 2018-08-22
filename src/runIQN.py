@@ -98,7 +98,7 @@ if __name__ == '__main__':
                 episode += 1
                 rewards_history.append(total_reward)
                 loss_history.append(total_loss)
-                print(' [{:5d}/{:5d}] eps={:.3f} epi={:4d}, epi_len={:3d}, reward={:.3f}, loss={:.5f}').format(step, MAX_STEP, agent.epsilon, episode, episode_len, total_reward, total_loss)
+                print(' [{:5d}/{:5d}] eps={:.3f} epi={:4d}, epi_len={:3d}, reward={:.2f}, loss={:.3f}').format(step, MAX_STEP, agent.epsilon, episode, episode_len, total_reward, total_loss)
                 # if (episode % 10 == 0):
                 #     plt.hold()
                 #     plt.subplot(2,4,(1,2))
